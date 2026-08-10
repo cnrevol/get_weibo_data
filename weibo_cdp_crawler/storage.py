@@ -49,6 +49,7 @@ class Storage:
               user_id TEXT,
               screen_name TEXT,
               created_at TEXT,
+              created_at_iso TEXT,
               text TEXT,
               list_text TEXT,
               full_text TEXT,
@@ -110,6 +111,7 @@ class Storage:
             "text_source": "ALTER TABLE posts ADD COLUMN text_source TEXT",
             "is_long_text": "ALTER TABLE posts ADD COLUMN is_long_text INTEGER",
             "fulltext_raw_json": "ALTER TABLE posts ADD COLUMN fulltext_raw_json TEXT",
+            "created_at_iso": "ALTER TABLE posts ADD COLUMN created_at_iso TEXT",
         }
         for column, sql in migrations.items():
             if column not in existing:
@@ -158,17 +160,18 @@ class Storage:
         self.conn.execute(
             """
             INSERT INTO posts(
-              post_id, run_id, mblogid, user_id, screen_name, created_at, text, source,
+              post_id, run_id, mblogid, user_id, screen_name, created_at, created_at_iso, text, source,
               list_text, full_text, text_source, is_long_text,
               reposts_count, comments_count, attitudes_count, detail_url, source_url,
               raw_json, fulltext_raw_json, first_seen_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(post_id) DO UPDATE SET
               mblogid=COALESCE(NULLIF(excluded.mblogid, ''), posts.mblogid),
               user_id=COALESCE(NULLIF(excluded.user_id, ''), posts.user_id),
               screen_name=COALESCE(NULLIF(excluded.screen_name, ''), posts.screen_name),
               created_at=COALESCE(NULLIF(excluded.created_at, ''), posts.created_at),
+              created_at_iso=COALESCE(NULLIF(excluded.created_at_iso, ''), posts.created_at_iso),
               text=CASE
                 WHEN NULLIF(excluded.full_text, '') IS NOT NULL THEN excluded.text
                 WHEN NULLIF(posts.full_text, '') IS NOT NULL THEN posts.text
@@ -205,6 +208,7 @@ class Storage:
                 post.get("user_id"),
                 post.get("screen_name"),
                 post.get("created_at"),
+                post.get("created_at_iso"),
                 post.get("text"),
                 post.get("source"),
                 post.get("list_text"),
@@ -285,7 +289,7 @@ class Storage:
     def list_posts(self, limit: int | None = None) -> list[dict[str, Any]]:
         sql = """
             SELECT post_id, mblogid, user_id, screen_name, created_at, text,
-                   list_text, full_text, text_source, is_long_text, source,
+                   created_at_iso, list_text, full_text, text_source, is_long_text, source,
                    reposts_count, comments_count, attitudes_count, detail_url, source_url
             FROM posts
             ORDER BY rowid
@@ -303,16 +307,17 @@ class Storage:
                 "screen_name": row[3],
                 "created_at": row[4],
                 "text": row[5],
-                "list_text": row[6],
-                "full_text": row[7],
-                "text_source": row[8],
-                "is_long_text": bool(row[9]),
-                "source": row[10],
-                "reposts_count": row[11],
-                "comments_count": row[12],
-                "attitudes_count": row[13],
-                "detail_url": row[14],
-                "source_url": row[15],
+                "created_at_iso": row[6],
+                "list_text": row[7],
+                "full_text": row[8],
+                "text_source": row[9],
+                "is_long_text": bool(row[10]),
+                "source": row[11],
+                "reposts_count": row[12],
+                "comments_count": row[13],
+                "attitudes_count": row[14],
+                "detail_url": row[15],
+                "source_url": row[16],
             }
             for row in rows
         ]

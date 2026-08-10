@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -19,6 +20,7 @@ from .extractors import (
     post_detail_urls,
 )
 from .storage import Storage
+from .dates import DateRange, parse_weibo_datetime
 
 
 LOG = logging.getLogger("weibo_cdp_crawler")
@@ -29,6 +31,8 @@ class CrawlerConfig:
     cdp: str = "http://127.0.0.1:9222"
     out: str = "data/weibo_run"
     max_posts: int = 100
+    date_start: str | None = None
+    date_end: str | None = None
     scroll_rounds: int = 80
     scroll_delay: float = 1.5
     max_comments_per_post: int = 200
@@ -45,8 +49,17 @@ class WeiboCdpCrawler:
         self.storage = Storage(Path(config.out))
         self.run_id: int | None = None
         self.posts_seen: set[str] = set()
+        self.posts_saved: set[str] = set()
         self.comments_seen: set[str] = set()
         self.target_url: str | None = None
+        self.date_range = DateRange(
+            start=datetime_from_iso(config.date_start),
+            end=datetime_from_iso(config.date_end),
+        )
+        self.posts_before_start_seen = 0
+        self.posts_after_end_seen = 0
+        self.posts_unknown_date_seen = 0
+        self.posts_in_range_seen = 0
 
     async def run(self):
         async with async_playwright() as p:
@@ -57,6 +70,8 @@ class WeiboCdpCrawler:
                 page = await self._select_page(context)
                 self.target_url = page.url
                 self.run_id = self.storage.create_run(self.target_url, asdict(self.config))
+                if self.date_range.enabled:
+                    LOG.info("Date range filter: %s", self.date_range.label())
                 page.on("response", lambda response: asyncio.create_task(self._on_response(response)))
 
                 LOG.info("Target page: %s", page.url)
@@ -112,10 +127,28 @@ class WeiboCdpCrawler:
 
         post_count = 0
         for post in extract_posts(payload, url):
+            post_id = post.get("post_id")
+            is_new_post = bool(post_id and post_id not in self.posts_seen)
+            parsed_created_at = parse_weibo_datetime(post.get("created_at"))
+            if parsed_created_at is not None:
+                post["created_at_iso"] = parsed_created_at.isoformat(sep=" ")
+            if post_id:
+                self.posts_seen.add(post_id)
+            if self.date_range.enabled and not self.date_range.contains(parsed_created_at):
+                if is_new_post:
+                    if self.date_range.before_start(parsed_created_at):
+                        self.posts_before_start_seen += 1
+                    elif self.date_range.after_or_at_end(parsed_created_at):
+                        self.posts_after_end_seen += 1
+                    else:
+                        self.posts_unknown_date_seen += 1
+                continue
+            if is_new_post and self.date_range.enabled:
+                self.posts_in_range_seen += 1
             if self.storage.save_post(self.run_id, post):
                 post_count += 1
-            if post.get("post_id"):
-                self.posts_seen.add(post["post_id"])
+            if post_id:
+                self.posts_saved.add(post_id)
 
         comment_count = 0
         for comment in extract_comments(payload, url):
@@ -129,22 +162,35 @@ class WeiboCdpCrawler:
 
     async def collect_posts(self, page: Page):
         LOG.info("Collecting posts by network capture and page scroll.")
-        last_count = 0
+        last_seen_count = 0
         stagnant_rounds = 0
         for idx in range(self.config.scroll_rounds):
-            if len(self.posts_seen) >= self.config.max_posts:
+            if len(self.posts_saved) >= self.config.max_posts:
                 break
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(int(self.config.scroll_delay * 1000))
-            current = len(self.posts_seen)
-            LOG.info("Post scroll %s/%s, posts=%s", idx + 1, self.config.scroll_rounds, current)
-            if current == last_count:
+            current_seen = len(self.posts_seen)
+            LOG.info(
+                "Post scroll %s/%s, saved_posts=%s, seen_posts=%s, in_range=%s, newer=%s, older=%s, unknown_date=%s",
+                idx + 1,
+                self.config.scroll_rounds,
+                len(self.posts_saved),
+                current_seen,
+                self.posts_in_range_seen,
+                self.posts_after_end_seen,
+                self.posts_before_start_seen,
+                self.posts_unknown_date_seen,
+            )
+            if current_seen == last_seen_count:
                 stagnant_rounds += 1
             else:
                 stagnant_rounds = 0
-            last_count = current
-            if stagnant_rounds >= 8:
-                LOG.info("Post count has not changed for 8 rounds; stopping post scroll.")
+            last_seen_count = current_seen
+            if stagnant_rounds >= 12:
+                LOG.info("Seen post count has not changed for 12 rounds; stopping post scroll.")
+                break
+            if self.date_range.enabled and self.posts_before_start_seen >= 12 and len(self.posts_saved) > 0:
+                LOG.info("Seen enough posts older than start date; stopping post scroll.")
                 break
 
     async def collect_comments(self, context: BrowserContext):
@@ -302,3 +348,9 @@ class WeiboCdpCrawler:
         finally:
             await page.close()
         return len(self.comments_seen) - before
+
+
+def datetime_from_iso(value: str | None):
+    if not value:
+        return None
+    return datetime.fromisoformat(value)

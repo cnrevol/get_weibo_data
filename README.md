@@ -1,104 +1,145 @@
 # Weibo CDP Crawler
 
-一个基于 Chrome DevTools Protocol 的微博采集工程。
+基于 Chrome DevTools Protocol 的微博采集工程。浏览器负责手动登录和触发页面请求，程序负责监听 JSON 响应、补抓全文、抓评论、结构化保存。
 
-目标流程：
+## 基本流程
 
 1. 启动带 CDP 端口的 Chrome。
 2. 手动登录微博。
-3. 手动打开要采集的账号主页。
-4. 在终端启动爬虫并确认开始。
-5. 程序监听页面 JSON 响应、自动滚动主页、提取微博列表。
-6. 程序用登录态补抓微博全文。
-7. 程序尝试用登录态请求评论接口，并把原始 JSON 与结构化数据落盘。
+3. 手动打开目标账户主页。
+4. 启动采集脚本，确认当前页面后开始。
+5. 程序滚动主页并抓取指定时间范围内的微博。
+6. 程序补抓微博全文。
+7. 程序抓取评论。
+8. 保存 SQLite、JSONL、原始 JSON。
 
-## 合规边界
-
-只采集当前登录账号有权限访问的内容。不要绕过验证码、权限、付费内容或访问控制。评论数据包含个人信息，后续共享和处理前需要按你的组织规则脱敏或审批。
-
-## 安装
-
-Windows PowerShell：
-
-```powershell
-.\scripts\run_crawler.ps1 --help
-```
-
-脚本会自动创建 `.venv` 并安装依赖。
-
-## 使用
-
-1. 启动 Chrome：
+## 启动 Chrome
 
 ```powershell
 .\scripts\start_chrome.ps1
 ```
 
-2. 在打开的 Chrome 中登录微博，并进入目标账号主页。
+默认参数：
 
-3. 启动采集：
-
-```powershell
-.\scripts\run_crawler.ps1 --out data\weibo_run --max-posts 100 --max-comments-per-post 200
+```text
+Port=9222
+ProfileDir=.\chrome-profile
 ```
 
-4. 终端提示后确认目标页面无误，输入回车开始。
+## 启动采集
 
-## 输出
-
-默认输出目录包含：
-
-- `weibo.sqlite`：结构化 SQLite 数据库。
-- `posts.jsonl`：规范化微博，一行一条。
-- `comments.jsonl`：规范化评论，一行一条。
-- `raw_responses/`：浏览器监听到的原始 JSON 响应。
-- `run.log`：运行日志。
-
-SQLite 表：
-
-- `runs`：每次采集任务。
-- `posts`：微博正文、作者、时间、互动数、原始 JSON。
-- `comments`：评论内容、评论人、时间、点赞数、原始 JSON。
-- `raw_responses`：原始接口响应文件索引。
-
-SQLite 运行时可能同时出现这些文件：
-
-- `weibo.sqlite`：主数据库文件。
-- `weibo.sqlite-wal`：SQLite write-ahead log，写前日志。程序运行中或连接未完全 checkpoint 时会存在。
-- `weibo.sqlite-shm`：SQLite WAL 共享内存索引文件。
-
-打开数据库时选择 `weibo.sqlite`。不要只复制一个 `weibo.sqlite` 文件做备份；如果程序刚跑完且 `-wal/-shm` 仍存在，先关闭所有数据库工具，或把三个文件一起复制。
-
-## 常用参数
+查看全部参数：
 
 ```powershell
-.\scripts\run_crawler.ps1 `
-  --cdp http://127.0.0.1:9222 `
-  --out data\account_a `
-  --max-posts 300 `
-  --scroll-rounds 120 `
-  --max-comments-per-post 500 `
-  --comment-delay 2.0
+.\scripts\run_crawler.ps1 --help
 ```
 
-默认会补抓微博全文。字段含义：
+当前主要参数：
 
-- `posts.list_text`：账号主页/列表接口返回的正文，可能是缩略文。
-- `posts.full_text`：详情/长文接口补抓到的全文。
-- `posts.text`：分析推荐使用字段。若存在全文，则等于 `full_text`；否则回退为 `list_text`。
-- `posts.text_source`：`full_text` 或 `list`。
-- `posts.is_long_text`：是否疑似长微博。
-- `posts.raw_json`：列表/详情卡片原始 JSON。
-- `posts.fulltext_raw_json`：全文接口原始 JSON。
+```text
+--cdp                      Chrome CDP 地址，默认 http://127.0.0.1:9222
+--out                      输出目录，默认 data/weibo_run
+--max-posts                最多保存多少条符合条件的微博，默认 100
+--month                    采集单月，例如 2026-07 或 2026年7月
+--since                    起始日期/月，包含，例如 2024-01、2024-01-15、2024年1月
+--until                    结束日期/月，包含输入的日期或整月，例如 2025-02、2025-02-28
+--scroll-rounds            最多滚动次数，默认 80
+--scroll-delay             每次滚动等待秒数，默认 1.5
+--max-comments-per-post    每条微博最多抓多少评论，默认 200
+--comment-delay            评论请求间隔秒数，默认 2.0
+--comment-pages            每条微博最多抓多少页评论，默认 50
+--skip-comments            只抓微博，不抓评论
+--no-fetch-fulltext        不补抓微博全文
+--verbose                  输出详细日志
+```
 
-如果只想快速抓列表，不补全文：
+## 时间范围示例
+
+采集 2026 年 7 月：
 
 ```powershell
-.\scripts\run_crawler.ps1 --out data\quick --max-posts 100 --no-fetch-fulltext
+.\scripts\run_crawler.ps1 --out data\weibo_2026_07 --month 2026-07 --max-posts 500
 ```
 
-## 注意
+采集 2024 年 1 月到 2025 年 2 月：
 
-- 程序优先保存原始 JSON，再做字段抽取。后续接口变化时，可以基于 `raw_responses/` 重新清洗。
-- 如果评论接口请求失败，程序会继续保留已经抓到的微博和原始响应。
-- 如果微博页面要求验证码或重新登录，需要在 Chrome 里手动处理后重新运行。
+```powershell
+.\scripts\run_crawler.ps1 --out data\weibo_2024_01_to_2025_02 --since 2024-01 --until 2025-02 --max-posts 5000
+```
+
+采集 2024-01-15 到 2024-02-20：
+
+```powershell
+.\scripts\run_crawler.ps1 --out data\weibo_range --since 2024-01-15 --until 2024-02-20 --max-posts 1000
+```
+
+说明：
+
+- `--month 2026-07` 等价于 `[2026-07-01, 2026-08-01)`。
+- `--since 2024-01 --until 2025-02` 等价于 `[2024-01-01, 2025-03-01)`，包含 2025 年 2 月整月。
+- `--until 2024-02-20` 会包含 2024-02-20 当天，内部等价于小于 2024-02-21。
+
+## 输出文件
+
+输出目录包含：
+
+```text
+weibo.sqlite
+posts.jsonl
+comments.jsonl
+raw_responses/
+run.log
+```
+
+SQLite 运行时可能同时出现：
+
+```text
+weibo.sqlite
+weibo.sqlite-wal
+weibo.sqlite-shm
+```
+
+`weibo.sqlite-wal` 是 SQLite 写前日志，不是异常文件。用 A5 SQL、DBeaver、SQLiteStudio 打开时选择 `weibo.sqlite`。复制备份时，如果 `-wal/-shm` 仍存在，关闭程序和数据库工具后再复制，或三个文件一起复制。
+
+## posts 表关键字段
+
+```text
+post_id              微博 ID
+mblogid              微博短 ID
+user_id              作者 ID
+screen_name          作者昵称
+created_at           微博原始时间字符串
+created_at_iso       程序解析后的标准时间，便于 SQL 过滤
+list_text            主页/列表接口返回文本，可能是缩略文
+full_text            全文接口补抓文本
+text                 推荐分析字段；有全文用全文，否则用 list_text
+text_source          full_text 或 list
+is_long_text         是否疑似长微博
+reposts_count        转发数
+comments_count       评论数
+attitudes_count      点赞数
+raw_json             列表/卡片原始 JSON
+fulltext_raw_json    全文接口原始 JSON
+```
+
+推荐查询：
+
+```sql
+select
+  post_id,
+  created_at_iso,
+  screen_name,
+  reposts_count,
+  comments_count,
+  attitudes_count,
+  text_source,
+  length(list_text) as list_len,
+  length(full_text) as full_len,
+  text
+from posts
+order by created_at_iso desc;
+```
+
+## 合规边界
+
+只采集当前登录账号有权限访问的内容。不要绕过验证码、权限、付费内容或访问控制。评论数据包含个人信息，后续共享和处理前需要按组织规则脱敏或审批。
